@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
 <title>直播源管理</title>
 <style>
+/* 样式保持不变，与之前相同 */
 body{margin:0;padding:5px;background:#f5f5f5;font-family:sans-serif}
 .container{max-width:100%;margin:auto;padding:5px;display:flex;flex-direction:column;height:calc(100vh - 10px)}
 .header{text-align:center;padding:10px;border-bottom:2px solid #007bff;flex-shrink:0}
@@ -288,20 +289,20 @@ body{margin:0;padding:5px;background:#f5f5f5;font-family:sans-serif}
       
       <div class="control-row">
         <span class="control-label">检测超时(秒):</span>
-        <input type="range" class="control-slider" id="timeoutSlider" min="1" max="20" value="10">
-        <span class="control-value" id="timeoutValue">10秒</span>
+        <input type="range" class="control-slider" id="timeoutSlider" min="1" max="20" value="8">
+        <span class="control-value" id="timeoutValue">8秒</span>
       </div>
       
       <div class="control-row">
         <span class="control-label">检测间隔(毫秒):</span>
-        <input type="range" class="control-slider" id="delaySlider" min="10" max="1000" value="200">
-        <span class="control-value" id="delayValue">200ms</span>
+        <input type="range" class="control-slider" id="delaySlider" min="10" max="1000" value="300">
+        <span class="control-value" id="delayValue">300ms</span>
       </div>
       
       <div class="control-row">
         <span class="control-label">并发数量:</span>
-        <input type="range" class="control-slider" id="concurrencySlider" min="3" max="50" value="8">
-        <span class="control-value" id="concurrencyValue">8个</span>
+        <input type="range" class="control-slider" id="concurrencySlider" min="1" max="15" value="5">
+        <span class="control-value" id="concurrencyValue">5个</span>
       </div>
       
       <div class="progress-bar">
@@ -437,7 +438,8 @@ body{margin:0;padding:5px;background:#f5f5f5;font-family:sans-serif}
       sources: {}
     },
     selectedUrls: new Set(), // 存储勾选的URL
-    currentVideoUrl: '' // 当前播放的视频URL
+    currentVideoUrl: '', // 当前播放的视频URL
+    activeVideos: new Map() // 存储活跃的视频元素用于清理
   };
   
   // DOM元素引用
@@ -686,6 +688,21 @@ body{margin:0;padding:5px;background:#f5f5f5;font-family:sans-serif}
       } else {
         return '低清';
       }
+    },
+    
+    // 清理所有活跃的视频元素
+    cleanupAllVideos: () => {
+      state.activeVideos.forEach((videoInfo, key) => {
+        if (videoInfo.video) {
+          videoInfo.video.src = '';
+          videoInfo.video.load();
+          if (videoInfo.video.parentNode) {
+            videoInfo.video.parentNode.removeChild(videoInfo.video);
+          }
+          clearTimeout(videoInfo.timeoutId);
+        }
+      });
+      state.activeVideos.clear();
     }
   };
   
@@ -1380,10 +1397,11 @@ body{margin:0;padding:5px;background:#f5f5f5;font-family:sans-serif}
   const detector = {
     queue: [],
     workers: [],
-    timeout: 10000,
-    delay: 200,
-    concurrency: 8,
+    timeout: 8000, // 默认8秒
+    delay: 300, // 默认300ms
+    concurrency: 5, // 默认5个并发
     running: false,
+    abortController: null, // 用于取消检测
     
     init: () => {
       el.timeoutSlider.oninput = () => {
@@ -1413,6 +1431,7 @@ body{margin:0;padding:5px;background:#f5f5f5;font-family:sans-serif}
         video.muted = true;
         video.preload = 'auto';
         video.style.display = 'none';
+        video.playsInline = true;
         
         let loadedDataTriggered = false;
         let canPlayTriggered = false;
@@ -1421,7 +1440,9 @@ body{margin:0;padding:5px;background:#f5f5f5;font-family:sans-serif}
         let resolutionWidth = 0;
         let resolutionHeight = 0;
         
-        let timer = setTimeout(() => {
+        const videoId = `video_${index}_${Date.now()}`;
+        
+        const timer = setTimeout(() => {
           if (resolved) return;
           cleanup();
           
@@ -1455,9 +1476,19 @@ body{margin:0;padding:5px;background:#f5f5f5;font-family:sans-serif}
           clearTimeout(timer);
           video.src = '';
           video.load();
+          
+          // 移除所有事件监听器
+          video.onloadeddata = null;
+          video.oncanplay = null;
+          video.onerror = null;
+          video.onloadedmetadata = null;
+          
           if (video.parentNode) {
             video.parentNode.removeChild(video);
           }
+          
+          // 从活跃视频Map中移除
+          state.activeVideos.delete(videoId);
         }
         
         function checkSuccess() {
@@ -1509,17 +1540,32 @@ body{margin:0;padding:5px;background:#f5f5f5;font-family:sans-serif}
           resolved = true;
         };
         
+        video.onloadedmetadata = () => {
+          // 记录分辨率
+          resolutionWidth = video.videoWidth || 0;
+          resolutionHeight = video.videoHeight || 0;
+        };
+        
+        // 将视频元素添加到活跃列表
+        state.activeVideos.set(videoId, {
+          video: video,
+          timeoutId: timer,
+          index: index
+        });
+        
         video.src = utils.cleanUrl(source.url);
         document.body.appendChild(video);
         video.load();
         
+        // 尝试播放，但忽略可能的错误
         video.play().catch(() => {
+          // 静默处理播放错误，不影响检测逻辑
         });
       });
     },
     
     updateProgress: () => {
-      const total = detector.queue.length;
+      const total = detector.queue.length + state.detectionStats.processed;
       const processed = state.detectionStats.processed;
       const progress = total > 0 ? (processed / total) * 100 : 0;
       
@@ -1577,7 +1623,6 @@ body{margin:0;padding:5px;background:#f5f5f5;font-family:sans-serif}
           const resolutionLevel = utils.getResolutionLevel(resolutionWidth, resolutionHeight);
           resolutionInfo = `, 分辨率: ${resolutionLevel} (${resolutionWidth}x${resolutionHeight})`;
         }
-        console.log(`检测结果 [${index}]: ${status}, 耗时: ${utils.formatTime(detectionTime)}${resolutionInfo}, 原因: ${reason}`);
         
         detector.updateProgress();
       }
@@ -1585,11 +1630,24 @@ body{margin:0;padding:5px;background:#f5f5f5;font-family:sans-serif}
     
     worker: async () => {
       while (detector.running && detector.queue.length > 0) {
+        // 检查是否被取消
+        if (detector.abortController && detector.abortController.signal.aborted) {
+          break;
+        }
+        
         const task = detector.queue.shift();
         if (!task) break;
         
-        const result = await detector.testSource(task.source, task.index);
-        detector.processResult(result);
+        try {
+          const result = await detector.testSource(task.source, task.index);
+          // 再次检查是否被取消
+          if (detector.abortController && detector.abortController.signal.aborted) {
+            break;
+          }
+          detector.processResult(result);
+        } catch (error) {
+          console.error('检测任务出错:', error);
+        }
         
         if (detector.delay > 0 && detector.queue.length > 0) {
           await new Promise(resolve => setTimeout(resolve, detector.delay));
@@ -1599,7 +1657,11 @@ body{margin:0;padding:5px;background:#f5f5f5;font-family:sans-serif}
     
     // 修复：添加自定义队列参数以支持分组检测
     start: async (customQueue) => {
-      if (detector.running) return;
+      if (detector.running) {
+        // 如果已经在运行，则停止
+        detector.stop();
+        return;
+      }
       
       // 使用自定义队列或默认队列
       const queue = customQueue || state.data.map((source, index) => ({ source, index }));
@@ -1609,7 +1671,12 @@ body{margin:0;padding:5px;background:#f5f5f5;font-family:sans-serif}
         return;
       }
       
+      // 清理之前的活跃视频
+      utils.cleanupAllVideos();
+      
       detector.running = true;
+      detector.abortController = new AbortController();
+      
       state.detectionStats = {
         processed: 0,
         valid: 0,
@@ -1625,7 +1692,7 @@ body{margin:0;padding:5px;background:#f5f5f5;font-family:sans-serif}
       el.testBtn.classList.remove('green');
       el.testBtn.classList.add('red');
       
-      detector.queue = queue;
+      detector.queue = [...queue]; // 创建副本
       
       detector.workers = [];
       const workerCount = Math.min(detector.concurrency, detector.queue.length);
@@ -1640,26 +1707,37 @@ body{margin:0;padding:5px;background:#f5f5f5;font-family:sans-serif}
         console.error('检测过程中出错:', error);
       }
       
+      // 检测完成后清理
+      utils.cleanupAllVideos();
       detector.stop();
     },
     
     stop: () => {
+      // 发送取消信号
+      if (detector.abortController) {
+        detector.abortController.abort();
+      }
+      
       detector.running = false;
       detector.queue = [];
       detector.workers = [];
+      
+      // 清理所有活跃的视频元素
+      utils.cleanupAllVideos();
       
       utils.toggleControls(true);
       el.testBtn.textContent = '开始检测';
       el.testBtn.classList.remove('red');
       el.testBtn.classList.add('green');
       
-      core.autoSelectAllValid();
-      
       if (state.detectionStats.processed > 0) {
+        core.autoSelectAllValid();
+        
         const avgTime = state.detectionStats.totalTime > 0 ? 
           Math.round(state.detectionStats.totalTime / state.detectionStats.processed) : 0;
         
-        alert(`检测完成！\n已处理: ${state.detectionStats.processed}个\n有效: ${state.detectionStats.valid}个\n失效: ${state.detectionStats.invalid}个\n平均耗时: ${utils.formatTime(avgTime)}`);
+        // 只显示最终结果，不弹窗
+        console.log(`检测完成！\n已处理: ${state.detectionStats.processed}个\n有效: ${state.detectionStats.valid}个\n失效: ${state.detectionStats.invalid}个\n平均耗时: ${utils.formatTime(avgTime)}`);
       }
     }
   };
@@ -1691,6 +1769,7 @@ body{margin:0;padding:5px;background:#f5f5f5;font-family:sans-serif}
           state.selectedUrls.clear();
           videoPlayer.stop();
           detector.stop();
+          utils.cleanupAllVideos();
           core.update();
         }
       };
@@ -1869,6 +1948,12 @@ body{margin:0;padding:5px;background:#f5f5f5;font-family:sans-serif}
       el.groupModal.onclick = e => {
         if (e.target === el.groupModal) el.groupModal.style.display = 'none';
       };
+      
+      // 页面卸载时清理
+      window.addEventListener('beforeunload', () => {
+        utils.cleanupAllVideos();
+        videoPlayer.stop();
+      });
       
       core.update();
     }
