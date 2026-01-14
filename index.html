@@ -3,8 +3,9 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
-<title>直播源管理1.1</title>
+<title>直播源管理</title>
 <style>
+/* 样式保持不变，与之前相同 */
 body{margin:0;padding:5px;background:#f5f5f5;font-family:sans-serif}
 .container{max-width:100%;margin:auto;padding:5px;display:flex;flex-direction:column;height:calc(100vh - 10px)}
 .header{text-align:center;padding:10px;border-bottom:2px solid #007bff;flex-shrink:0}
@@ -288,20 +289,20 @@ body{margin:0;padding:5px;background:#f5f5f5;font-family:sans-serif}
       
       <div class="control-row">
         <span class="control-label">检测超时(秒):</span>
-        <input type="range" class="control-slider" id="timeoutSlider" min="1" max="20" value="10">
-        <span class="control-value" id="timeoutValue">10秒</span>
+        <input type="range" class="control-slider" id="timeoutSlider" min="1" max="20" value="8">
+        <span class="control-value" id="timeoutValue">8秒</span>
       </div>
       
       <div class="control-row">
         <span class="control-label">检测间隔(毫秒):</span>
-        <input type="range" class="control-slider" id="delaySlider" min="10" max="1000" value="200">
-        <span class="control-value" id="delayValue">200ms</span>
+        <input type="range" class="control-slider" id="delaySlider" min="10" max="1000" value="300">
+        <span class="control-value" id="delayValue">300ms</span>
       </div>
       
       <div class="control-row">
         <span class="control-label">并发数量:</span>
-        <input type="range" class="control-slider" id="concurrencySlider" min="3" max="50" value="8">
-        <span class="control-value" id="concurrencyValue">8个</span>
+        <input type="range" class="control-slider" id="concurrencySlider" min="1" max="15" value="5">
+        <span class="control-value" id="concurrencyValue">5个</span>
       </div>
       
       <div class="progress-bar">
@@ -376,14 +377,22 @@ body{margin:0;padding:5px;background:#f5f5f5;font-family:sans-serif}
   <div class="modal-content">
     <div class="modal-header">网络导入</div>
     <div class="modal-body">
-      <input type="text" id="networkUrl" class="url-input" placeholder="输入URL地址">
+      <input type="text" id="networkUrl" class="url-input" placeholder="输入M3U/TXT直播源URL" value="http://iptv6.ct.ws/NiceTk/m3u_with_logo.txt">
       <div id="networkStatus" class="status"></div>
       <div style="font-size:12px;color:#666">
-        <p><strong>示例：</strong></p>
-        <p style="font-size:11px;word-break:break-all">http:\/\/ybtvsg.yuanbaotv.com\/api\/zip\/txtzztv\/202511061613\/kds_all_shlt_a160216bf6b3c6054c4a71d40132931c.txt</p>
-        <p style="font-size:11px;word-break:break-all">https://gitee.com/messy-in-the-win/tv/raw/master/%E5%90%88%E5%B9%B6%E5%9C%B0%E6%96%B9%E5%8F%B0.txt</p>
-        <p>支持.txt/.m3u/.m3u8格式</p>
-        <p><strong>支持格式：</strong>频道名称,URL 或 分组名称,#genre#分组名称 或 M3U格式(#EXTINF行)</p>
+        <p><strong>支持的格式：</strong></p>
+        <ul style="margin:5px 0;padding-left:15px">
+          <li>标准M3U格式 (#EXTM3U开头)</li>
+          <li>文本格式 (频道名称,URL)</li>
+          <li>分组格式 (分组名称,#genre#分组名称)</li>
+        </ul>
+        <p><strong>示例URL：</strong></p>
+        <div style="background:#f5f5f5;padding:5px;border-radius:3px;font-size:11px;word-break:break-all;margin:5px 0">
+          http://iptv6.ct.ws/NiceTk/m3u_with_logo.txt<br>
+          https://raw.githubusercontent.com/iptv-org/iptv/master/streams/cn.m3u<br>
+          http://home.jundie.top:81/top/tv.txt
+        </div>
+        <p><strong>提示：</strong>如果导入失败，可尝试复制URL内容保存为文件后使用"本地导入"</p>
       </div>
     </div>
     <div class="modal-footer">
@@ -437,7 +446,8 @@ body{margin:0;padding:5px;background:#f5f5f5;font-family:sans-serif}
       sources: {}
     },
     selectedUrls: new Set(), // 存储勾选的URL
-    currentVideoUrl: '' // 当前播放的视频URL
+    currentVideoUrl: '', // 当前播放的视频URL
+    activeVideos: new Map() // 存储活跃的视频元素用于清理
   };
   
   // DOM元素引用
@@ -496,21 +506,123 @@ body{margin:0;padding:5px;background:#f5f5f5;font-family:sans-serif}
     
     fetchUrl: async u => {
       const cleaned = utils.cleanUrl(u);
-      const proxies = [
-        `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(cleaned)}`,
-        `https://corsproxy.io/?${encodeURIComponent(cleaned)}`,
-        cleaned
+      
+      // 创建一个简单的策略：先尝试直接访问，失败后再尝试代理
+      const strategies = [
+        // 策略1: 直接访问（带超时和用户代理）
+        async (url) => {
+          try {
+            console.log('尝试直接访问:', url);
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 20000);
+            
+            const response = await fetch(url, {
+              signal: controller.signal,
+              headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/plain,text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+                'Accept-Encoding': 'gzip, deflate',
+                'Connection': 'keep-alive',
+                'Cache-Control': 'no-cache',
+                'Pragma': 'no-cache'
+              },
+              mode: 'cors',
+              credentials: 'omit'
+            });
+            
+            clearTimeout(timeoutId);
+            
+            if (!response.ok) {
+              throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+            }
+            
+            return await response.text();
+          } catch (error) {
+            console.log('直接访问失败:', error.message);
+            throw error;
+          }
+        },
+        
+        // 策略2: 使用allorigins代理
+        async (url) => {
+          try {
+            console.log('尝试allorigins代理访问:', url);
+            const proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`;
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 15000);
+            
+            const response = await fetch(proxyUrl, {
+              signal: controller.signal,
+              headers: {
+                'User-Agent': 'Mozilla/5.0'
+              }
+            });
+            
+            clearTimeout(timeoutId);
+            
+            if (!response.ok) {
+              throw new Error(`allorigins代理失败: HTTP ${response.status}`);
+            }
+            
+            return await response.text();
+          } catch (error) {
+            console.log('allorigins代理失败:', error.message);
+            throw error;
+          }
+        },
+        
+        // 策略3: 使用corsproxy.io
+        async (url) => {
+          try {
+            console.log('尝试corsproxy.io代理访问:', url);
+            const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(url)}`;
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 15000);
+            
+            const response = await fetch(proxyUrl, {
+              signal: controller.signal,
+              headers: {
+                'User-Agent': 'Mozilla/5.0'
+              }
+            });
+            
+            clearTimeout(timeoutId);
+            
+            if (!response.ok) {
+              throw new Error(`corsproxy.io代理失败: HTTP ${response.status}`);
+            }
+            
+            return await response.text();
+          } catch (error) {
+            console.log('corsproxy.io代理失败:', error.message);
+            throw error;
+          }
+        }
       ];
       
-      for (let p of proxies) {
+      // 尝试所有策略
+      let lastError = null;
+      
+      for (let i = 0; i < strategies.length; i++) {
         try {
-          const c = new AbortController();
-          setTimeout(() => c.abort(), 10000);
-          const r = await fetch(p, { signal: c.signal, headers: { 'User-Agent': 'Mozilla/5.0' } });
-          if (r.ok) return await r.text();
-        } catch (e) {}
+          const result = await strategies[i](cleaned);
+          if (result && result.trim().length > 0) {
+            console.log(`策略 ${i + 1} 成功获取内容，长度: ${result.length}`);
+            return result;
+          } else {
+            console.log(`策略 ${i + 1} 返回空内容`);
+            lastError = new Error('内容为空');
+          }
+        } catch (error) {
+          console.log(`策略 ${i + 1} 失败:`, error.message);
+          lastError = error;
+        }
       }
-      throw new Error('所有代理均失败');
+      
+      // 所有策略都失败
+      const errorMsg = lastError ? lastError.message : '未知错误';
+      throw new Error(`无法获取URL内容: ${errorMsg}\nURL: ${cleaned}`);
     },
     
     toggleControls: (enable) => {
@@ -686,6 +798,21 @@ body{margin:0;padding:5px;background:#f5f5f5;font-family:sans-serif}
       } else {
         return '低清';
       }
+    },
+    
+    // 清理所有活跃的视频元素
+    cleanupAllVideos: () => {
+      state.activeVideos.forEach((videoInfo, key) => {
+        if (videoInfo.video) {
+          videoInfo.video.src = '';
+          videoInfo.video.load();
+          if (videoInfo.video.parentNode) {
+            videoInfo.video.parentNode.removeChild(videoInfo.video);
+          }
+          clearTimeout(videoInfo.timeoutId);
+        }
+      });
+      state.activeVideos.clear();
     }
   };
   
@@ -1380,10 +1507,11 @@ body{margin:0;padding:5px;background:#f5f5f5;font-family:sans-serif}
   const detector = {
     queue: [],
     workers: [],
-    timeout: 10000,
-    delay: 200,
-    concurrency: 8,
+    timeout: 8000, // 默认8秒
+    delay: 300, // 默认300ms
+    concurrency: 5, // 默认5个并发
     running: false,
+    abortController: null, // 用于取消检测
     
     init: () => {
       el.timeoutSlider.oninput = () => {
@@ -1413,6 +1541,7 @@ body{margin:0;padding:5px;background:#f5f5f5;font-family:sans-serif}
         video.muted = true;
         video.preload = 'auto';
         video.style.display = 'none';
+        video.playsInline = true;
         
         let loadedDataTriggered = false;
         let canPlayTriggered = false;
@@ -1421,7 +1550,9 @@ body{margin:0;padding:5px;background:#f5f5f5;font-family:sans-serif}
         let resolutionWidth = 0;
         let resolutionHeight = 0;
         
-        let timer = setTimeout(() => {
+        const videoId = `video_${index}_${Date.now()}`;
+        
+        const timer = setTimeout(() => {
           if (resolved) return;
           cleanup();
           
@@ -1455,9 +1586,19 @@ body{margin:0;padding:5px;background:#f5f5f5;font-family:sans-serif}
           clearTimeout(timer);
           video.src = '';
           video.load();
+          
+          // 移除所有事件监听器
+          video.onloadeddata = null;
+          video.oncanplay = null;
+          video.onerror = null;
+          video.onloadedmetadata = null;
+          
           if (video.parentNode) {
             video.parentNode.removeChild(video);
           }
+          
+          // 从活跃视频Map中移除
+          state.activeVideos.delete(videoId);
         }
         
         function checkSuccess() {
@@ -1509,17 +1650,32 @@ body{margin:0;padding:5px;background:#f5f5f5;font-family:sans-serif}
           resolved = true;
         };
         
+        video.onloadedmetadata = () => {
+          // 记录分辨率
+          resolutionWidth = video.videoWidth || 0;
+          resolutionHeight = video.videoHeight || 0;
+        };
+        
+        // 将视频元素添加到活跃列表
+        state.activeVideos.set(videoId, {
+          video: video,
+          timeoutId: timer,
+          index: index
+        });
+        
         video.src = utils.cleanUrl(source.url);
         document.body.appendChild(video);
         video.load();
         
+        // 尝试播放，但忽略可能的错误
         video.play().catch(() => {
+          // 静默处理播放错误，不影响检测逻辑
         });
       });
     },
     
     updateProgress: () => {
-      const total = detector.queue.length;
+      const total = detector.queue.length + state.detectionStats.processed;
       const processed = state.detectionStats.processed;
       const progress = total > 0 ? (processed / total) * 100 : 0;
       
@@ -1577,7 +1733,6 @@ body{margin:0;padding:5px;background:#f5f5f5;font-family:sans-serif}
           const resolutionLevel = utils.getResolutionLevel(resolutionWidth, resolutionHeight);
           resolutionInfo = `, 分辨率: ${resolutionLevel} (${resolutionWidth}x${resolutionHeight})`;
         }
-        console.log(`检测结果 [${index}]: ${status}, 耗时: ${utils.formatTime(detectionTime)}${resolutionInfo}, 原因: ${reason}`);
         
         detector.updateProgress();
       }
@@ -1585,11 +1740,24 @@ body{margin:0;padding:5px;background:#f5f5f5;font-family:sans-serif}
     
     worker: async () => {
       while (detector.running && detector.queue.length > 0) {
+        // 检查是否被取消
+        if (detector.abortController && detector.abortController.signal.aborted) {
+          break;
+        }
+        
         const task = detector.queue.shift();
         if (!task) break;
         
-        const result = await detector.testSource(task.source, task.index);
-        detector.processResult(result);
+        try {
+          const result = await detector.testSource(task.source, task.index);
+          // 再次检查是否被取消
+          if (detector.abortController && detector.abortController.signal.aborted) {
+            break;
+          }
+          detector.processResult(result);
+        } catch (error) {
+          console.error('检测任务出错:', error);
+        }
         
         if (detector.delay > 0 && detector.queue.length > 0) {
           await new Promise(resolve => setTimeout(resolve, detector.delay));
@@ -1599,7 +1767,11 @@ body{margin:0;padding:5px;background:#f5f5f5;font-family:sans-serif}
     
     // 修复：添加自定义队列参数以支持分组检测
     start: async (customQueue) => {
-      if (detector.running) return;
+      if (detector.running) {
+        // 如果已经在运行，则停止
+        detector.stop();
+        return;
+      }
       
       // 使用自定义队列或默认队列
       const queue = customQueue || state.data.map((source, index) => ({ source, index }));
@@ -1609,7 +1781,12 @@ body{margin:0;padding:5px;background:#f5f5f5;font-family:sans-serif}
         return;
       }
       
+      // 清理之前的活跃视频
+      utils.cleanupAllVideos();
+      
       detector.running = true;
+      detector.abortController = new AbortController();
+      
       state.detectionStats = {
         processed: 0,
         valid: 0,
@@ -1625,7 +1802,7 @@ body{margin:0;padding:5px;background:#f5f5f5;font-family:sans-serif}
       el.testBtn.classList.remove('green');
       el.testBtn.classList.add('red');
       
-      detector.queue = queue;
+      detector.queue = [...queue]; // 创建副本
       
       detector.workers = [];
       const workerCount = Math.min(detector.concurrency, detector.queue.length);
@@ -1640,26 +1817,37 @@ body{margin:0;padding:5px;background:#f5f5f5;font-family:sans-serif}
         console.error('检测过程中出错:', error);
       }
       
+      // 检测完成后清理
+      utils.cleanupAllVideos();
       detector.stop();
     },
     
     stop: () => {
+      // 发送取消信号
+      if (detector.abortController) {
+        detector.abortController.abort();
+      }
+      
       detector.running = false;
       detector.queue = [];
       detector.workers = [];
+      
+      // 清理所有活跃的视频元素
+      utils.cleanupAllVideos();
       
       utils.toggleControls(true);
       el.testBtn.textContent = '开始检测';
       el.testBtn.classList.remove('red');
       el.testBtn.classList.add('green');
       
-      core.autoSelectAllValid();
-      
       if (state.detectionStats.processed > 0) {
+        core.autoSelectAllValid();
+        
         const avgTime = state.detectionStats.totalTime > 0 ? 
           Math.round(state.detectionStats.totalTime / state.detectionStats.processed) : 0;
         
-        alert(`检测完成！\n已处理: ${state.detectionStats.processed}个\n有效: ${state.detectionStats.valid}个\n失效: ${state.detectionStats.invalid}个\n平均耗时: ${utils.formatTime(avgTime)}`);
+        // 只显示最终结果，不弹窗
+        console.log(`检测完成！\n已处理: ${state.detectionStats.processed}个\n有效: ${state.detectionStats.valid}个\n失效: ${state.detectionStats.invalid}个\n平均耗时: ${utils.formatTime(avgTime)}`);
       }
     }
   };
@@ -1691,6 +1879,7 @@ body{margin:0;padding:5px;background:#f5f5f5;font-family:sans-serif}
           state.selectedUrls.clear();
           videoPlayer.stop();
           detector.stop();
+          utils.cleanupAllVideos();
           core.update();
         }
       };
@@ -1698,7 +1887,7 @@ body{margin:0;padding:5px;background:#f5f5f5;font-family:sans-serif}
       document.getElementById('localImportBtn').onclick = () => el.fileInput.click();
       
       document.getElementById('networkImportBtn').onclick = () => {
-        el.networkUrl.value = '';
+        el.networkUrl.value = 'http://iptv6.ct.ws/NiceTk/m3u_with_logo.txt';
         el.networkStatus.style.display = 'none';
         el.modal.style.display = 'block';
       };
@@ -1743,36 +1932,59 @@ body{margin:0;padding:5px;background:#f5f5f5;font-family:sans-serif}
         }
         
         if (!cleaned.startsWith('http://') && !cleaned.startsWith('https://')) {
-          utils.showStatus('URL格式错误', true);
+          utils.showStatus('URL必须以 http:// 或 https:// 开头', true);
           return;
         }
         
-        utils.showStatus('', false);
-        document.getElementById('confirmImportBtn').disabled = true;
+        utils.showStatus('正在获取URL内容...', false);
+        const importBtn = document.getElementById('confirmImportBtn');
+        const originalText = importBtn.textContent;
+        importBtn.disabled = true;
+        importBtn.textContent = '导入中...';
         
         try {
           const text = await utils.fetchUrl(url);
-          if (!text) throw new Error('内容为空');
+          if (!text) throw new Error('获取的内容为空');
           
           const items = core.extractUrls(text);
-          if (items.length === 0) throw new Error('未找到有效URL');
+          if (items.length === 0) {
+            // 尝试显示前500个字符，帮助诊断问题
+            const preview = text.substring(0, 500);
+            throw new Error(`未找到有效的直播源格式。内容预览:\n${preview}...`);
+          }
           
           const result = core.addSources(items);
-          utils.showStatus(`导入${result.added}个直播源，新增${result.newGroups}个分组`, false);
+          utils.showStatus(`成功导入 ${result.added} 个直播源，新增 ${result.newGroups} 个分组`, false);
           core.update();
           
+          // 成功导入后自动关闭对话框
           setTimeout(() => {
-            if (el.modal.style.display === 'block') el.modal.style.display = 'none';
-          }, 2000);
+            el.modal.style.display = 'none';
+            importBtn.disabled = false;
+            importBtn.textContent = originalText;
+          }, 1500);
+          
         } catch (e) {
           let msg = '导入失败: ';
-          if (e.message.includes('失败')) msg += '无法访问URL';
-          else if (e.message.includes('fetch')) msg += '网络错误';
-          else msg += e.message;
+          if (e.message.includes('无法获取URL内容')) {
+            msg += '无法访问该URL，请检查网络或URL是否正确';
+          } else if (e.message.includes('未找到有效的直播源格式')) {
+            msg = e.message; // 使用完整的错误消息
+          } else if (e.message.includes('fetch') || e.message.includes('network')) {
+            msg += '网络错误，请检查网络连接';
+          } else if (e.message.includes('abort')) {
+            msg += '请求超时，请稍后重试';
+          } else {
+            msg += e.message;
+          }
+          
           utils.showStatus(msg, true);
+          importBtn.disabled = false;
+          importBtn.textContent = originalText;
+          
+          // 提供调试信息
+          console.error('导入错误详情:', e);
         }
-        
-        document.getElementById('confirmImportBtn').disabled = false;
       };
       
       document.getElementById('selectAllGroupsBtn').onclick = () => {
@@ -1869,6 +2081,12 @@ body{margin:0;padding:5px;background:#f5f5f5;font-family:sans-serif}
       el.groupModal.onclick = e => {
         if (e.target === el.groupModal) el.groupModal.style.display = 'none';
       };
+      
+      // 页面卸载时清理
+      window.addEventListener('beforeunload', () => {
+        utils.cleanupAllVideos();
+        videoPlayer.stop();
+      });
       
       core.update();
     }
